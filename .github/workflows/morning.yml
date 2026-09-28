@@ -1,0 +1,29 @@
+name: 毎朝のリプ素材
+
+on:
+  schedule:
+    - cron: "50 21 * * *"   # JST 6:50
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install PyYAML
+      - run: python morning.py
+      - name: Issueで届ける（メール・GitHubアプリに通知）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for n in $(gh issue list --label morning --state open --json number -q '.[].number'); do gh issue close "$n"; done
+          gh label create morning --color FBCA04 --force >/dev/null
+          printf '@%s\n\n' "${{ github.repository_owner }}" | cat - morning.md > body.md
+          gh issue create --title "☀️ $(TZ=Asia/Tokyo date '+%-m/%-d') のリプ素材" --label morning --body-file body.md
