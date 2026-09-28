@@ -159,7 +159,22 @@ def bootstrap_pick(it: dict) -> dict:
 
 
 # ---------------------------------------------------------------- 投稿文
-def compose(deal: dict) -> str:
+def choose_tag() -> str:
+    """その日の状況に合わせてトピックタグを自動で選ぶ"""
+    t = CFG["tags"]
+    for p in t.get("sale_periods") or []:
+        if str(p["start"]) <= TODAY <= str(p["end"]):
+            return p["tag"]
+    if NOW.day == 1 and t.get("day_1"):
+        return t["day_1"]
+    if NOW.day % 5 == 0 and t.get("day_5_0"):
+        return t["day_5_0"]
+    normal = t["normal"]
+    return normal[(NOW.timetuple().tm_yday * 4 + NOW.hour // 6) % len(normal)]
+
+
+def compose(deal: dict) -> tuple[str, str]:
+    """(本文, リプライ) を返す。リンクはリプライ側に入れる"""
     it = deal["item"]
     price = int(it["itemPrice"])
     url = it.get("affiliateUrl") or it["itemUrl"]
@@ -174,16 +189,20 @@ def compose(deal: dict) -> str:
         f"📉 {' / '.join(deal['reasons'])}",
         f"🏪 {it.get('shopName', '')}",
         "",
-        "※価格・ポイントは投稿時点。購入前にご確認ください",
-        url,
-        f"#{CFG['post']['topic_tag']}",
+        "👇商品ページはリプ欄に貼っています",
+        f"#{choose_tag()}",
     ]
     text = "\n".join(lines)
     if len(text) > 500:  # Threadsの上限
         lines[1] = f"🛒{head}｜{clean_name(it['itemName'], 20)}"
         lines.pop(6)
         text = "\n".join(lines)
-    return text
+    reply = "\n".join([
+        "【PR】楽天市場の商品ページはこちら👇",
+        url,
+        "※価格・ポイントは投稿時点。購入前にご確認ください",
+    ])
+    return text, reply
 
 
 def image_url(it: dict) -> str | None:
@@ -198,7 +217,20 @@ def image_url(it: dict) -> str | None:
 THREADS = "https://graph.threads.net/v1.0"
 
 
-def threads_post(text: str, img: str | None) -> str:
+def _publish(cid: str, token: str, wait: int) -> str:
+    time.sleep(wait)
+    for attempt in range(5):
+        p = requests.post(f"{THREADS}/me/threads_publish",
+                          data={"creation_id": cid, "access_token": token}, timeout=30)
+        if p.status_code == 200:
+            return p.json()["id"]
+        log("[Threads] publish待機中", p.text[:200])
+        time.sleep(10 * (attempt + 1))
+    p.raise_for_status()
+    return ""
+
+
+def threads_post(text: str, img: str | None, reply: str | None = None) -> str:
     token = os.environ["THREADS_TOKEN"]
     data = {"text": text, "access_token": token}
     if img and CFG["post"]["use_image"]:
@@ -212,17 +244,17 @@ def threads_post(text: str, img: str | None) -> str:
         data["media_type"] = "TEXT"
         r = requests.post(f"{THREADS}/me/threads", data=data, timeout=30)
     r.raise_for_status()
-    cid = r.json()["id"]
-    time.sleep(15 if data["media_type"] == "IMAGE" else 3)
-    for attempt in range(5):
-        p = requests.post(f"{THREADS}/me/threads_publish",
-                          data={"creation_id": cid, "access_token": token}, timeout=30)
-        if p.status_code == 200:
-            return p.json()["id"]
-        log("[Threads] publish待機中", p.text[:200])
-        time.sleep(10 * (attempt + 1))
-    p.raise_for_status()
-    return ""
+    post_id = _publish(r.json()["id"], token, 15 if data["media_type"] == "IMAGE" else 3)
+
+    if reply and post_id:  # リンクは自分のリプライに付ける
+        rr = requests.post(f"{THREADS}/me/threads", data={
+            "media_type": "TEXT", "text": reply, "reply_to_id": post_id, "access_token": token}, timeout=30)
+        if rr.status_code == 200:
+            rid = _publish(rr.json()["id"], token, 5)
+            log(f"[Threads] リンク返信 id={rid}")
+        else:  # 失敗時はActionsを赤くしてメール通知させる
+            raise RuntimeError(f"リンク返信に失敗（threads_manage_repliesの権限を確認）: {rr.text[:300]}")
+    return post_id
 
 
 # ---------------------------------------------------------------- まとめページ
@@ -314,12 +346,12 @@ def main():
 
     n = 0
     for d in queue[: CFG["post"]["per_run"]]:
-        text = compose(d)
-        log("-" * 40 + "\n" + text + "\n" + "-" * 40)
+        text, reply = compose(d)
+        log("-" * 40 + "\n" + text + "\n--- リプライ ---\n" + reply + "\n" + "-" * 40)
         if DRY_RUN:
             log("[DRY_RUN] 投稿スキップ")
             continue
-        pid = threads_post(text, image_url(d["item"]))
+        pid = threads_post(text, image_url(d["item"]), reply)
         log(f"[Threads] 投稿完了 id={pid}")
         posted[d["item"]["itemCode"]] = {
             "d": TODAY, "p": int(d["item"]["itemPrice"]), "pt": d["point"], "boot": bootstrap}
