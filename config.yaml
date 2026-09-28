@@ -1,0 +1,55 @@
+# ===== 楽天 日用品セール速報ボット 設定 =====
+# ここを編集するだけで運用を調整できます。
+
+# 楽天API（仕様変更時はここのURLだけ差し替え）
+rakuten:
+  search_endpoint: "https://openapi.rakuten.co.jp/ichibams/api/IchibaItem/Search/20260701"
+  sleep_sec: 1.2          # APIへの連続アクセス間隔
+
+# 監視する商品キーワード（1キーワード＝1リクエスト）
+keywords:
+  - トイレットペーパー
+  - ボックスティッシュ
+  - キッチンペーパー
+  - 洗濯洗剤 詰め替え
+  - 柔軟剤 詰め替え
+  - 食器用洗剤 詰め替え
+  - シャンプー 詰め替え
+  - ボディソープ 詰め替え
+  - ハンドソープ 詰め替え
+  - ゴミ袋 45L
+  - ミネラルウォーター 2L
+  - 炭酸水 500ml
+  - 歯ブラシ
+  - 除菌シート
+  - ラップ
+  - 猫砂
+  - ペットシーツ
+
+# 商品の足切り条件
+filter:
+  min_price: 300
+  max_price: 8000
+  min_review_count: 30
+  min_review_avg: 4.0
+  free_shipping_only: true
+  ng_words: ["中古", "ジャンク", "訳あり品", "福袋", "ふるさと納税"]
+
+# お得判定
+deal:
+  lookback_days: 30       # 何日前までの最高値と比べるか
+  min_history_days: 3     # 価格履歴が何日分たまったら値下がり判定するか
+  min_drop: 0.10          # 10%以上の値下がりでお得判定
+  min_point_rate: 5       # ポイント5倍以上ならお得判定
+  repost_block_days: 7    # 同じ商品は7日間再投稿しない
+
+# 投稿
+post:
+  per_run: 1              # 1回の実行で投稿する数（1日4回実行→1日4投稿）
+  use_image: true         # 商品画像付きで投稿
+  topic_tag: "楽天お買い物"  # Threadsのトピックタグ（1投稿1つまで）
+
+# まとめページ
+site:
+  title: "楽天 日用品セール速報"
+  max_items: 40

@@ -1,0 +1,22 @@
+name: Threadsトークン自動更新
+
+# Threadsのトークンは60日で切れるため、月2回自動で延長する
+on:
+  schedule:
+    - cron: "40 1 1,15 * *"
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: トークン延長とSecret更新
+        env:
+          THREADS_TOKEN: ${{ secrets.THREADS_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          RES=$(curl -s "https://graph.threads.net/refresh_access_token?grant_type=th_refresh_token&access_token=${THREADS_TOKEN}")
+          NEW=$(echo "$RES" | jq -r '.access_token // empty')
+          if [ -z "$NEW" ]; then echo "更新失敗: $RES"; exit 1; fi
+          echo "有効期限(秒): $(echo "$RES" | jq -r '.expires_in')"
+          gh secret set THREADS_TOKEN --body "$NEW" --repo "$GITHUB_REPOSITORY"
