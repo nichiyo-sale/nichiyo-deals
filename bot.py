@@ -127,6 +127,11 @@ def prune_history(hist: dict):
         del hist[code]
 
 
+def is_goods(it: dict) -> bool:
+    """収納・雑貨系（消耗品ではない）かどうか"""
+    return any(w in it.get("itemName", "") for w in CFG["deal"].get("goods_words", []))
+
+
 def evaluate(it: dict, hist: dict) -> dict | None:
     d = CFG["deal"]
     price = int(it["itemPrice"])
@@ -142,7 +147,8 @@ def evaluate(it: dict, hist: dict) -> dict | None:
     reasons = []
     if drop >= d["min_drop"]:
         reasons.append(f"直近{d['lookback_days']}日の最高値{ref:,}円から{round(drop * 100)}%ダウン")
-    if point >= d["min_point_rate"]:
+    min_pt = d["min_point_rate"] if is_goods(it) else d.get("min_point_rate_consumable", d["min_point_rate"])
+    if point >= min_pt:
         reasons.append(f"ポイント{point}倍")
     if not reasons:
         return None
@@ -179,7 +185,7 @@ def compose(deal: dict) -> tuple[str, str]:
     price = int(it["itemPrice"])
     url = it.get("affiliateUrl") or it["itemUrl"]
     head = f"{round(deal['drop'] * 100)}%OFF" if deal["drop"] >= CFG["deal"]["min_drop"] else (
-        f"ポイント{deal['point']}倍" if deal["point"] >= CFG["deal"]["min_point_rate"] else "定番")
+        f"ポイント{deal['point']}倍" if any(r.startswith("ポイント") for r in deal["reasons"]) else "定番")
     lines = [
         "【PR】",
         f"🛒{head}｜{clean_name(it['itemName'])}",
@@ -309,6 +315,7 @@ def main():
     for kw in CFG["keywords"]:
         for it in rakuten_search(kw):
             if "itemCode" in it and passes_filter(it):
+                it["_kw"] = kw
                 seen.setdefault(it["itemCode"], it)
         time.sleep(CFG["rakuten"]["sleep_sec"])
     log(f"取得商品数: {len(seen)}")
@@ -329,6 +336,10 @@ def main():
     log(f"候補: {len(deals)}件")
 
     build_site(deals)
+    save_json("latest_deals.json", [{
+        "name": clean_name(d["item"]["itemName"], 30), "kw": d["item"].get("_kw", ""),
+        "price": int(d["item"]["itemPrice"]), "point": d["point"],
+        "drop": round(d["drop"] * 100), "reasons": d["reasons"]} for d in deals[:20]])
 
     block = (NOW - timedelta(days=CFG["deal"]["repost_block_days"])).strftime("%Y-%m-%d")
     def can_post(d):
@@ -344,8 +355,18 @@ def main():
     if bootstrap and any(v["d"] == TODAY for v in posted.values()):
         queue = []
 
+    # 日用品（消耗品）と雑貨を交互に投稿する
+    last = max(posted.values(), key=lambda v: v.get("t", v["d"]), default=None)
+    want_consumable = not (last and last.get("g") is False)
+    picks = []
+    for _ in range(CFG["post"]["per_run"]):
+        pool = [d for d in queue if d not in picks]
+        pref = [d for d in pool if is_goods(d["item"]) != want_consumable]
+        if pref or pool:
+            picks.append((pref or pool)[0])
+            want_consumable = is_goods(picks[-1]["item"])
     n = 0
-    for d in queue[: CFG["post"]["per_run"]]:
+    for d in picks:
         text, reply = compose(d)
         log("-" * 40 + "\n" + text + "\n--- リプライ ---\n" + reply + "\n" + "-" * 40)
         if DRY_RUN:
@@ -354,7 +375,8 @@ def main():
         pid = threads_post(text, image_url(d["item"]), reply)
         log(f"[Threads] 投稿完了 id={pid}")
         posted[d["item"]["itemCode"]] = {
-            "d": TODAY, "p": int(d["item"]["itemPrice"]), "pt": d["point"], "boot": bootstrap}
+            "d": TODAY, "t": NOW.isoformat(), "p": int(d["item"]["itemPrice"]), "pt": d["point"],
+            "boot": bootstrap, "g": is_goods(d["item"])}
         n += 1
 
     old = (NOW - timedelta(days=60)).strftime("%Y-%m-%d")
