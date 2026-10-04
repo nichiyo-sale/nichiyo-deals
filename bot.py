@@ -88,6 +88,29 @@ def rakuten_search(keyword: str) -> list[dict]:
     return []
 
 
+def rakuten_ranking(genre_id) -> list[dict]:
+    """ジャンル別ランキング（売れ筋）を取得。失敗してもそのジャンルを飛ばすだけ"""
+    origin = os.environ["SITE_ORIGIN"].rstrip("/")
+    params = {
+        "applicationId": os.environ["RAKUTEN_APP_ID"],
+        "accessKey": os.environ["RAKUTEN_ACCESS_KEY"],
+        "affiliateId": os.environ["RAKUTEN_AFFILIATE_ID"],
+        "format": "json", "formatVersion": 2, "genreId": genre_id, "page": 1,
+    }
+    headers = {"Origin": origin, "Referer": origin + "/", "User-Agent": "nichiyo-deals-bot/1.0"}
+    for attempt in range(3):
+        r = requests.get(CFG["rakuten"]["ranking_endpoint"], params=params, headers=headers, timeout=20)
+        if r.status_code == 429:
+            time.sleep(3 * (attempt + 1))
+            continue
+        if r.status_code != 200:
+            log(f"[楽天ランキング] genre {genre_id}: HTTP {r.status_code} {r.text[:200]}")
+            return []
+        items = r.json().get("Items", [])
+        return [i.get("Item", i) for i in items]
+    return []
+
+
 def clean_name(name: str, limit: int = 42) -> str:
     s = re.sub(r"[【\[［<＜(（][^】\]］>＞)）]{0,40}[】\]］>＞)）]", " ", name)
     s = re.sub(r"[★☆◆◇■□●○♪！!※]+", " ", s)
@@ -102,6 +125,12 @@ def passes_filter(it: dict) -> bool:
     if int(it.get("reviewCount") or 0) < f["min_review_count"]:
         return False
     if float(it.get("reviewAverage") or 0) < f["min_review_avg"]:
+        return False
+    if f.get("free_shipping_only") and int(it.get("postageFlag") or 0) == 1:
+        return False
+    if not (f["min_price"] <= int(it.get("itemPrice") or 0) <= f["max_price"]):
+        return False
+    if int(it.get("availability", 1) or 0) == 0:
         return False
     return bool(it.get("affiliateUrl") or it.get("itemUrl"))
 
@@ -147,7 +176,8 @@ def evaluate(it: dict, hist: dict) -> dict | None:
     reasons = []
     if drop >= d["min_drop"]:
         reasons.append(f"直近{d['lookback_days']}日の最高値{ref:,}円から{round(drop * 100)}%ダウン")
-    min_pt = d["min_point_rate"] if is_goods(it) else d.get("min_point_rate_consumable", d["min_point_rate"])
+    consumable = it.get("_genre", "日用品") == "日用品" and not is_goods(it)
+    min_pt = d.get("min_point_rate_consumable", d["min_point_rate"]) if consumable else d["min_point_rate"]
     if point >= min_pt:
         reasons.append(f"ポイント{point}倍")
     if not reasons:
@@ -316,6 +346,14 @@ def main():
         for it in rakuten_search(kw):
             if "itemCode" in it and passes_filter(it):
                 it["_kw"] = kw
+                it["_genre"] = "日用品"
+                seen.setdefault(it["itemCode"], it)
+        time.sleep(CFG["rakuten"]["sleep_sec"])
+    for gid, gname in (CFG.get("genres") or {}).items():
+        for it in rakuten_ranking(gid):
+            if "itemCode" in it and passes_filter(it):
+                it["_kw"] = gname
+                it["_genre"] = gname
                 seen.setdefault(it["itemCode"], it)
         time.sleep(CFG["rakuten"]["sleep_sec"])
     log(f"取得商品数: {len(seen)}")
@@ -338,6 +376,7 @@ def main():
     build_site(deals)
     save_json("latest_deals.json", [{
         "name": clean_name(d["item"]["itemName"], 30), "kw": d["item"].get("_kw", ""),
+        "genre": d["item"].get("_genre", "日用品"),
         "price": int(d["item"]["itemPrice"]), "point": d["point"],
         "drop": round(d["drop"] * 100), "reasons": d["reasons"]} for d in deals[:20]])
 
@@ -355,16 +394,22 @@ def main():
     if bootstrap and any(v["d"] == TODAY for v in posted.values()):
         queue = []
 
-    # 日用品（消耗品）と雑貨を交互に投稿する
-    last = max(posted.values(), key=lambda v: v.get("t", v["d"]), default=None)
-    want_consumable = not (last and last.get("g") is False)
+    # 直近の投稿と違うジャンルを優先して、いろいろなジャンルを順番に出す
+    recent_n = CFG["post"].get("genre_spread", 4)
+    history = sorted(posted.values(), key=lambda v: v.get("t", v["d"]), reverse=True)
+    recent = [v.get("gn") for v in history[:recent_n]]
     picks = []
     for _ in range(CFG["post"]["per_run"]):
         pool = [d for d in queue if d not in picks]
-        pref = [d for d in pool if is_goods(d["item"]) != want_consumable]
+        used = recent + [p["item"].get("_genre") for p in picks]
+        pref = [d for d in pool if d["item"].get("_genre", "日用品") not in used]
+        # 日用品はアカウントの軸なので、一定間隔で必ず入れる
+        every = CFG["post"].get("daily_every", 3)
+        if "日用品" not in used[: every - 1]:
+            daily = [d for d in pool if d["item"].get("_genre", "日用品") == "日用品"]
+            pref = daily or pref
         if pref or pool:
             picks.append((pref or pool)[0])
-            want_consumable = is_goods(picks[-1]["item"])
     n = 0
     for d in picks:
         text, reply = compose(d)
@@ -376,7 +421,7 @@ def main():
         log(f"[Threads] 投稿完了 id={pid}")
         posted[d["item"]["itemCode"]] = {
             "d": TODAY, "t": NOW.isoformat(), "p": int(d["item"]["itemPrice"]), "pt": d["point"],
-            "boot": bootstrap, "g": is_goods(d["item"])}
+            "boot": bootstrap, "g": is_goods(d["item"]), "gn": d["item"].get("_genre", "日用品")}
         n += 1
 
     old = (NOW - timedelta(days=60)).strftime("%Y-%m-%d")
